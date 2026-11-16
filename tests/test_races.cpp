@@ -130,6 +130,9 @@ TOS_TEST(worker_fence_races_completion) {
   DispatchOutcome outcome = runtime.scheduler().plan_reserve_dispatch(request, payload);
   TOS_REQUIRE(outcome.plan_result.planned);
   const ExecutionAttemptId attempt_id = outcome.plan_result.plan.attempt;
+  // The executor runs on the channel's pool: wait until it has produced the completion
+  // the channel withholds, so the release below has something to deliver.
+  tos_test::wait_until([&] { return runtime.channel().delayed_count() == 1U; });
   ExecutionAttempt before;
   TOS_REQUIRE(runtime.scheduler().attempts().get(attempt_id, before));
 
@@ -314,6 +317,8 @@ TOS_TEST(fallback_races_original_completion) {
   DispatchOutcome outcome = runtime.scheduler().plan_reserve_dispatch(request, payload);
   TOS_REQUIRE(outcome.plan_result.planned);
   const ExecutionAttemptId original = outcome.plan_result.plan.attempt;
+  // The original completion exists and is withheld before the domain is declared lost.
+  tos_test::wait_until([&] { return runtime.channel().delayed_count() == 1U; });
   ExecutionAttempt before;
   TOS_REQUIRE(runtime.scheduler().attempts().get(original, before));
 

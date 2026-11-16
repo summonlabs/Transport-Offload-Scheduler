@@ -171,7 +171,10 @@ endif()
 # ---- helpers ---------------------------------------------------------------
 function(tos_add_tool target)
   foreach(source ${ARGN})
-    if(NOT EXISTS "${source}")
+    # A relative path in if(EXISTS) is resolved against the directory cmake was started
+    # from, so configuring from anywhere but the source root skipped every tool.
+    get_filename_component(source_path "${source}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT EXISTS "${source_path}")
       message(STATUS "skipping ${target}: ${source} not present")
       return()
     endif()
