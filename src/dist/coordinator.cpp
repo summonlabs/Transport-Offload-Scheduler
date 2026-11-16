@@ -78,7 +78,12 @@ struct OffloadCoordinator::Impl {
 
   mutable std::mutex sessions_mutex;
   std::map<std::uint64_t, std::shared_ptr<Session>> sessions;
-  std::vector<std::thread> session_threads;
+  /// A session's thread and the flag it sets as its last act.
+  struct SessionThread {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+  std::vector<SessionThread> session_threads;
   std::thread accept_thread;
 
   /// Dispatch channel that routes envelopes to the session owning a domain.
@@ -197,13 +202,30 @@ void OffloadCoordinator::Impl::accept_loop() {
     bool admitted = false;
     {
       std::lock_guard<std::mutex> lock(sessions_mutex);
+      // Threads of finished sessions are joined and dropped here, so the coordinator
+      // holds a thread only per live session rather than one per session it ever
+      // served. Joining under the registry lock is safe for these threads only: they
+      // set their flag after their epilogue, which is the part that takes this lock.
+      for (auto entry = session_threads.begin(); entry != session_threads.end();) {
+        if (entry->finished->load()) {
+          if (entry->thread.joinable()) entry->thread.join();
+          entry = session_threads.erase(entry);
+        } else {
+          ++entry;
+        }
+      }
       if (sessions.size() >= config.max_sessions) {
         log_write(LogLevel::kWarn, "coordinator", "session limit reached; refusing connection");
       } else {
         sessions[session->id] = session;
         // The thread holds its own reference for its whole lifetime, so the session
         // outlives its registry entry without anybody joining it from inside itself.
-        session_threads.emplace_back([this, session] { session_loop(session); });
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        session_threads.push_back(SessionThread{std::thread([this, session, finished] {
+                                                  session_loop(session);
+                                                  finished->store(true);
+                                                }),
+                                                finished});
         admitted = true;
       }
     }
@@ -732,13 +754,13 @@ Status OffloadCoordinator::stop() {
   // Threads are joined with no coordinator lock held: a session's epilogue takes the
   // session registry lock to erase itself, so joining under that lock would be a
   // wait-for cycle. The thread handles are moved out first.
-  std::vector<std::thread> threads;
+  std::vector<Impl::SessionThread> threads;
   {
     std::lock_guard<std::mutex> lock(impl_->sessions_mutex);
     threads.swap(impl_->session_threads);
   }
-  for (std::thread& thread : threads) {
-    if (thread.joinable()) thread.join();
+  for (Impl::SessionThread& entry : threads) {
+    if (entry.thread.joinable()) entry.thread.join();
   }
   {
     std::lock_guard<std::mutex> lock(impl_->sessions_mutex);

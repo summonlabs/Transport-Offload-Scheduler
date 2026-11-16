@@ -93,6 +93,8 @@ if(TOS_ENABLE_ASAN)
     # fires when a translation unit is instrumented without debug information, which
     # would otherwise fail the build under /WX.
     target_compile_options(transport_offload_scheduler PUBLIC /fsanitize=address /Zi /wd5072)
+    # Without /DEBUG every instrumented link warns (LNK4302), which fails a clean build.
+    target_link_options(transport_offload_scheduler PUBLIC /DEBUG)
   else()
     target_compile_options(transport_offload_scheduler PUBLIC -fsanitize=address -fno-omit-frame-pointer)
     target_link_options(transport_offload_scheduler PUBLIC -fsanitize=address)
@@ -140,7 +142,22 @@ if(TOS_ENABLE_CUDA)
     else()
       target_compile_options(tos_cuda_kernels PRIVATE -Xcompiler=-Wall)
     endif()
+    if(TOS_ENABLE_ASAN AND MSVC)
+      # The device unit's host code links into instrumented binaries, so it must be
+      # instrumented too (otherwise LNK2038: annotate_string/annotate_vector mismatch).
+      target_compile_options(tos_cuda_kernels PRIVATE "-Xcompiler=/fsanitize=address" "-Xcompiler=/Zi")
+    endif()
     target_sources(transport_offload_scheduler PRIVATE $<TARGET_OBJECTS:tos_cuda_kernels>)
+    # The library carries the device objects, so multi-configuration generators (Visual
+    # Studio) require its CUDA architectures as well; it was created before CUDA was
+    # enabled and so has none.
+    set_target_properties(transport_offload_scheduler PROPERTIES
+      CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+    if(MSVC)
+      # cudart_static.lib requests the static CRT (/DEFAULTLIB:LIBCMT) while this project
+      # links the DLL CRT, so every program that links the bridge would warn (LNK4098).
+      target_link_options(transport_offload_scheduler PUBLIC /NODEFAULTLIB:LIBCMT)
+    endif()
     target_compile_definitions(transport_offload_scheduler PRIVATE TOS_HAS_CUDA=1)
   else()
     message(STATUS "no CUDA toolkit: the accelerator backend will report UNSUPPORTED")

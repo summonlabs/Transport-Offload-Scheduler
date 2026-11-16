@@ -159,6 +159,8 @@ struct Scheduler::Impl {
   mutable std::atomic<std::uint64_t> snapshot_counter{0};
   std::atomic<std::uint64_t> domain_counter{0};
   PersistenceGeneration persisted_generation;
+  /// Serializes saves: they share one temporary file and the generation counter.
+  std::mutex save_mutex;
 
   CoordinatorEpoch epoch;
   WorkerId local_worker;
@@ -1826,6 +1828,9 @@ Status Scheduler::save_state() { return save_state_to(impl_->options.state_path)
 
 Status Scheduler::save_state_to(std::string_view path) {
   if (path.empty()) return Status::failure("state.no_path");
+  // Overlapping saves (an operator request, an epoch change, shutdown) would write the
+  // same temporary file at once and fail or replace each other's partial writes.
+  std::lock_guard<std::mutex> save_lock(impl_->save_mutex);
   PersistedState state;
   state.generation = PersistenceGeneration(
       impl_->persisted_generation.published() ? impl_->persisted_generation.value() + 1 : 1);

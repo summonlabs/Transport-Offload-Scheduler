@@ -247,7 +247,17 @@ TOS_TEST(worker_death_before_acknowledgement_is_ambiguous) {
   TOS_REQUIRE(dying.ok());
   const std::string ready = wait_for_ready_line(dying.value);
   TOS_CHECK_MSG(ready.rfind("WORKER_READY", 0) == 0, ready);
-  tos_test::wait_until([&] { return coordinator.scheduler().domains().size() >= 1; });
+  // Registration and evidence are separate publications: plan only once the domain's
+  // evidence is current, as worker_death_fencing_with_real_processes does. Planning in
+  // between finds no current evidence and is refused as STALE_EVIDENCE.
+  tos_test::wait_until([&] {
+    const std::vector<ExecutionDomainRecord> registered = coordinator.scheduler().domains().all();
+    if (registered.empty()) return false;
+    for (const ExecutionDomainRecord& domain : registered) {
+      if (!domain.load.published()) return false;
+    }
+    return true;
+  });
 
   // A non-repeatable operation: replaying it would append a second record.
   const std::vector<std::uint8_t> payload = tos_test::make_payload(256, 5);

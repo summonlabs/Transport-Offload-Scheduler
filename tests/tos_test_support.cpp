@@ -94,7 +94,10 @@ tos::Checked<std::shared_ptr<tos::ProcessHandle>> spawn_tool(
   // Test executables live in a subdirectory of the build tree, so the tool is
   // located by probing the usual layouts instead of hardcoding a path.
   const std::string directory = executable_directory();
+  // Single-configuration generators (Ninja) put the tools one level above the
+  // tests; multi-configuration generators put them in <build>\<config>.
   const std::string candidates[] = {directory + "\\" + tool + ".exe",
+                                    directory + "\\..\\" + tool + ".exe",
                                     directory + "\\..\\..\\" + tool + ".exe",
                                     directory + "\\..\\..\\Release\\" + tool + ".exe",
                                     directory + "\\..\\..\\Debug\\" + tool + ".exe"};

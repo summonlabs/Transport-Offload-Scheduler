@@ -244,8 +244,15 @@ Status TcpListener::listen_on(const std::string& host, std::uint16_t port, int b
     return Status::failure("net.socket_failed", last_socket_error());
   }
   const int reuse = 1;
+#ifdef _WIN32
+  // SO_REUSEADDR on Windows lets a second socket bind a port that is still listening;
+  // exclusive use makes that second bind fail instead.
+  ::setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&reuse),
+               sizeof(reuse));
+#else
   ::setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
                sizeof(reuse));
+#endif
   if (::bind(socket, results->ai_addr, static_cast<int>(results->ai_addrlen)) != 0) {
     ::freeaddrinfo(results);
     close_native(socket);

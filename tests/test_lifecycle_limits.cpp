@@ -18,6 +18,16 @@
 #include "tos/dist/protocol.hpp"
 #include "tos_test_support.hpp"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 using namespace tos;
 
 namespace {
@@ -603,3 +613,60 @@ TOS_TEST(lifecycle_coordinator_rebinds_the_same_port_after_stop) {
     session.close();
   }
 }
+
+// Two coordinators must never share one listening port: the second start() fails.
+TOS_TEST(lifecycle_second_coordinator_cannot_take_a_listening_port) {
+  dist::CoordinatorConfig first_config;
+  first_config.bind_host = "127.0.0.1";
+  first_config.port = 0;
+  dist::OffloadCoordinator first(std::move(first_config));
+  TOS_REQUIRE(first.start().ok);
+  dist::CoordinatorConfig second_config;
+  second_config.bind_host = "127.0.0.1";
+  second_config.port = first.port();
+  dist::OffloadCoordinator second(std::move(second_config));
+  const Status started = second.start();
+  TOS_CHECK_MSG(!started.ok, "a second coordinator bound a port another coordinator is listening on");
+  if (started.ok) {
+    TOS_CHECK(second.stop().ok);
+  }
+  TOS_CHECK(first.stop().ok);
+}
+
+#ifdef _WIN32
+// A finished session must not keep its thread (and the thread's handle) until stop():
+// a long-running coordinator serves far more sessions than it ever holds at once.
+TOS_TEST(lifecycle_finished_sessions_release_their_threads) {
+  dist::CoordinatorConfig config;
+  config.bind_host = "127.0.0.1";
+  config.port = 0;
+  dist::OffloadCoordinator coordinator(std::move(config));
+  TOS_REQUIRE(coordinator.start().ok);
+  const std::uint16_t port = coordinator.port();
+  const auto serve_one = [port]() {
+    RawWorkerSession session(port);
+    if (!session.connected()) return false;
+    const bool served = session.query_version();
+    session.close();
+    return served;
+  };
+  TOS_REQUIRE(serve_one());
+  tos_test::wait_until([&coordinator] { return coordinator.session_count() == 0; });
+  DWORD before = 0;
+  TOS_REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &before) != 0);
+  constexpr int kSessions = 200;  // far more than max_sessions (32)
+  int served = 0;
+  for (int i = 0; i < kSessions; ++i) {
+    if (serve_one()) ++served;
+    tos_test::wait_until([&coordinator] { return coordinator.session_count() == 0; });
+  }
+  TOS_CHECK_EQ(served, kSessions);
+  DWORD after = 0;
+  TOS_REQUIRE(GetProcessHandleCount(GetCurrentProcess(), &after) != 0);
+  // A retained thread keeps one handle, so growth that tracks the session count is the defect.
+  TOS_CHECK_MSG(after < before + 64, "process handles grew from " + std::to_string(before) + " to " +
+                                         std::to_string(after) + " over " +
+                                         std::to_string(kSessions) + " finished sessions");
+  TOS_CHECK(coordinator.stop().ok);
+}
+#endif

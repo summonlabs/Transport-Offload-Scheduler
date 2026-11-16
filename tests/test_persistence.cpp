@@ -10,7 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <atomic>
 #include <filesystem>
+#include <thread>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -985,4 +987,43 @@ TOS_TEST(persistence_path_safety_and_missing_files) {
   TOS_CHECK(!scheduler.load_state_from("..").ok);
   TOS_CHECK_EQ(scheduler.load_state_from("..").code, std::string("state.unsafe_path"));
   TOS_REQUIRE(scheduler.shutdown().ok);
+}
+
+// Saves can overlap (an operator's save-state request, an epoch change, shutdown): every
+// one must succeed and the file left behind must be a complete, loadable state.
+TOS_TEST(persistence_concurrent_saves_leave_a_loadable_state) {
+  const std::string path = "tos_persistence_concurrent.state";
+  const std::string temporary = path + ".tmp";
+  std::remove(path.c_str());
+  std::remove(temporary.c_str());
+
+  tos_test::TestRuntime runtime;
+  TOS_REQUIRE(runtime
+                  .add_domain(make_synthetic_domain(ExecutionDomainId(41), ExecutionDomainType::kDpu,
+                                                    "dpu.concurrent"))
+                  .valid());
+  TOS_REQUIRE(commit_one(runtime, 4096, 9).id.valid());
+
+  constexpr int kThreads = 4;
+  constexpr int kSavesPerThread = 25;
+  std::atomic<int> failed{0};
+  std::vector<std::thread> savers;
+  for (int t = 0; t < kThreads; ++t) {
+    savers.emplace_back([&runtime, &path, &failed] {
+      for (int i = 0; i < kSavesPerThread; ++i) {
+        if (!runtime.scheduler().save_state_to(path).ok) failed.fetch_add(1);
+      }
+    });
+  }
+  for (std::thread& saver : savers) saver.join();
+  TOS_CHECK_MSG(failed.load() == 0,
+                std::to_string(failed.load()) + " of " + std::to_string(kThreads * kSavesPerThread) +
+                    " overlapping saves failed");
+
+  const StateStore store(path);
+  const Checked<PersistedState> loaded = store.load();
+  TOS_CHECK_MSG(loaded.ok(), "overlapping saves left an unloadable state file: " + loaded.status.code);
+  TOS_CHECK_MSG(!std::filesystem::exists(temporary), "overlapping saves left a .tmp sibling");
+  std::remove(path.c_str());
+  std::remove(temporary.c_str());
 }
